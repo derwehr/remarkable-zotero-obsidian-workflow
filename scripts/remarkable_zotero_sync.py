@@ -60,8 +60,9 @@ def parse_args():
     )
     parser.add_argument(
         "--remarks-cmd",
-        default=os.environ.get("REMARKS_CMD", "python -m remarks"),
-        help="How to invoke remarks (default: %(default)s)",
+        default=os.environ.get("REMARKS_CMD", "remarks"),
+        help="How to invoke remarks (default: %(default)s). Use a full path if "
+        "you installed it into a venv that is not on PATH.",
     )
     parser.add_argument(
         "--install",
