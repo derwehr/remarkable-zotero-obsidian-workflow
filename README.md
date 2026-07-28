@@ -21,6 +21,25 @@ reMarkable cloud  ->  tablet, read and annotate
 same local folder  ->  Zotero: File -> Import Annotations
 ```
 
+## Coming from the Google Drive setup
+
+Delete the Apps Script trigger first, at <https://script.google.com> under
+Triggers. That script trashed the unannotated original before renaming the
+annotated copy over it, so any run that failed between those two steps left the
+file in Drive's trash with nothing live carrying its name, and Zotero reporting
+the attachment as missing. On an hourly trigger it keeps getting chances.
+
+Then restore what it took, from Drive's own trash at <https://drive.google.com>
+rather than through the mount. To find the casualties, list trashed PDFs that
+have no live counterpart:
+
+```sh
+comm -23 <(basename -a ~/google-drive/.Trash/*.pdf | sort -u) \
+         <(basename -a ~/google-drive/zotero/*.pdf | sort -u)
+```
+
+Once the library is a local folder, none of this applies any more.
+
 ## Setup
 
 ### Zotero
