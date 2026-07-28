@@ -115,6 +115,17 @@ reports what it would change.
 After a sync, open each listed item in Zotero and use
 `File -> Import Annotations`.
 
+To check that the round trip actually produced annotations Zotero can read,
+before or after installing them:
+
+```sh
+"$(dirname "$(readlink -f "$(command -v remarks)")")/python" \
+  scripts/show_highlights.py ~/.cache/remarkable-zotero-sync/out
+```
+
+It lists every highlight annotation and the text underneath it. A file that
+looks highlighted but reports zero has nothing for Zotero to import.
+
 ## Known limitations
 
 **Importing is manual, and re-importing duplicates.** Both follow from the
