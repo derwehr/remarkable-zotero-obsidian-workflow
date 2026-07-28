@@ -72,15 +72,17 @@ def parse_args():
 
 
 def run(cmd, cwd=None):
-    """Run a command, echoing it first so a cron log shows what happened."""
-    print(f"  $ {shlex.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    """Run a command, echoing it first so a cron log shows what happened.
+
+    Output is deliberately not captured. rmapi reports progress per document
+    as it downloads, and prompts for a one-time code once its token expires.
+    Capturing either turns a long download into an unreadable pause, and an
+    auth prompt into a silent hang on a question you never saw.
+    """
+    print(f"  $ {shlex.join(cmd)}", flush=True)
+    result = subprocess.run(cmd, cwd=cwd)
     if result.returncode != 0:
-        sys.exit(
-            f"command failed ({result.returncode}): {shlex.join(cmd)}\n"
-            f"{result.stderr.strip()}"
-        )
-    return result.stdout
+        sys.exit(f"command failed ({result.returncode}): {shlex.join(cmd)}")
 
 
 def sha256(path):
