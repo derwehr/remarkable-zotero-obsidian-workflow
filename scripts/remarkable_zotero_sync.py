@@ -70,6 +70,16 @@ def parse_args():
         help="Actually replace the PDFs in your library. Without this, only report.",
     )
     parser.add_argument(
+        "--push",
+        action="store_true",
+        help="Also send library PDFs the tablet does not have yet",
+    )
+    parser.add_argument(
+        "--rm-dest",
+        default=os.environ.get("RM_DEST", "/"),
+        help="Folder on the reMarkable to push new PDFs into (default: %(default)s)",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Name every document that has no matching file in the library",
@@ -141,7 +151,11 @@ def download_bundles(rm_folder, dest):
     for name in sorted(duplicates):
         print(f"  ? {name}: {len(by_name[name])} documents share this name, ignored")
 
-    return bundles
+    # Every name the tablet holds, including the ones ignored above, so that
+    # pushing does not re-upload a paper that is merely ambiguous or deleted.
+    on_device = {bundle.stem for bundle in kept + trashed}
+
+    return bundles, on_device
 
 
 def unpack(bundles, xochitl_dir):
@@ -162,24 +176,58 @@ def convert(remarks_cmd, xochitl_dir, out_dir):
     return sorted(out_dir.rglob(f"*{SUFFIX}"))
 
 
-def find_target(zotero_dir, stem):
-    """Locate the library file a converted document belongs to.
+def index_library(zotero_dir):
+    """Index every PDF in the library by name, in one pass.
+
+    Walked rather than globbed per document, for two reasons. Hidden
+    directories have to be pruned as the walk descends: Google Drive keeps
+    deleted files in .Trash, where a paper you threw away still carries the
+    exact name of the one you kept, and writing annotations into the trashed
+    copy would look like success while the real attachment went untouched.
+
+    The other reason is cost. A library on a FUSE-mounted cloud drive turns
+    every directory into a network round trip, so the walk happens once and
+    is answered from memory after that.
 
     The reMarkable document name is the filename ZotMoov created, minus the
-    extension, which is what makes this match possible at all.
+    extension, which is what makes matching on the name possible at all.
     """
-    matches = [
-        path
-        for path in zotero_dir.rglob(f"{stem}.pdf")
-        if path.is_file() and not path.name.startswith(".")
-    ]
-    if not matches:
-        return None, "missing", f"no file named {stem}.pdf under {zotero_dir}"
-    if len(matches) > 1:
-        # Same posture as the Drive script: ambiguity means do nothing rather
-        # than overwrite whichever copy happened to be found first.
-        return None, "ambiguous", f"{len(matches)} files named {stem}.pdf"
-    return matches[0], None, None
+    print(f"Indexing {zotero_dir}", flush=True)
+    index = {}
+    for root, dirs, files in os.walk(zotero_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in files:
+            if name.endswith(".pdf") and not name.startswith("."):
+                index.setdefault(name[: -len(".pdf")], []).append(Path(root) / name)
+    print(f"  {len(index)} PDF(s)")
+    return index
+
+
+def push_new(library, on_device, dest, install):
+    """Send library PDFs the tablet does not already hold.
+
+    Only ever uploads what is missing. A document already on the tablet is
+    left alone even when the local file differs, because after a sync it
+    differs precisely because the annotations were written into it: pushing
+    that back would make the annotated copy the tablet's source PDF, and the
+    next sync would render the same annotations onto it a second time.
+
+    Names already in the tablet's trash count as present. Deleting a paper on
+    the device is a decision, and re-uploading it every run would undo it.
+    """
+    outstanding = sorted(
+        paths[0] for name, paths in library.items()
+        if name not in on_device and len(paths) == 1
+    )
+    if not outstanding:
+        print("\nTablet already has every paper in the library.")
+        return
+
+    print(f"\n{'Sending' if install else 'Would send'} {len(outstanding)} new paper(s) to {dest}:")
+    for path in outstanding:
+        print(f"  <- {path.name}")
+        if install:
+            run(["rmapi", "put", str(path), dest])
 
 
 def preserve_original(target, originals_dir):
@@ -197,9 +245,22 @@ def preserve_original(target, originals_dir):
 def main():
     args = parse_args()
 
-    for tool in ("rmapi",):
-        if shutil.which(tool) is None:
-            sys.exit(f"{tool} not found on PATH")
+    # Check before the download rather than after it: the conversion runs at
+    # the end of a transfer that can take minutes, and finding out then that
+    # the converter is missing wastes all of it.
+    if shutil.which("rmapi") is None:
+        sys.exit("rmapi not found on PATH: https://github.com/ddvk/rmapi")
+
+    remarks_bin = shlex.split(args.remarks_cmd)[0]
+    if shutil.which(remarks_bin) is None:
+        sys.exit(
+            f"{remarks_bin} not found.\n"
+            "remarks cannot be installed with pip: it pins rmscene to a commit "
+            "while its own dependency rmc asks for the branch, and pip refuses "
+            "two direct references to one package. Use poetry or nix, per\n"
+            "https://github.com/Scrybbling-together/remarks, then point this at "
+            "the result with --remarks-cmd or $REMARKS_CMD."
+        )
 
     zotero_dir = Path(args.zotero_dir).expanduser().resolve()
     if not zotero_dir.is_dir():
@@ -216,34 +277,32 @@ def main():
     xochitl_dir = fresh_dir(work_dir / "xochitl")
     out_dir = fresh_dir(work_dir / "out")
 
-    bundles = download_bundles(args.rm_folder, downloads)
-    if not bundles:
-        print("Nothing to do.")
-        return
+    bundles, on_device = download_bundles(args.rm_folder, downloads)
 
     # Hash the source bundle rather than the converted PDF: the question is
     # whether the annotations changed, not whether remarks renders identically
     # between versions.
     fingerprints = {bundle.stem: sha256(bundle) for bundle in bundles}
+    library = index_library(zotero_dir)
 
-    unpack(bundles, xochitl_dir)
-    converted = convert(args.remarks_cmd, xochitl_dir, out_dir)
+    # Decide what is worth converting before converting it. Notebooks and the
+    # guides reMarkable ships with can never match a library file, and each one
+    # still costs a full render, which for a notebook holding typed text means
+    # driving headless Chrome a page at a time.
+    pending, skipped, missing, ambiguous = [], [], [], []
 
-    changed, skipped, missing, ambiguous = [], [], [], []
-
-    for pdf in converted:
-        stem = pdf.name[: -len(SUFFIX)]
-
-        if state.get(stem, {}).get("bundle_sha256") == fingerprints.get(stem):
+    for bundle in bundles:
+        stem = bundle.stem
+        if state.get(stem, {}).get("bundle_sha256") == fingerprints[stem]:
             skipped.append(stem)
             continue
-
-        target, kind, problem = find_target(zotero_dir, stem)
-        if target is None:
-            (ambiguous if kind == "ambiguous" else missing).append((stem, problem))
-            continue
-
-        changed.append((stem, pdf, target))
+        targets = library.get(stem, [])
+        if not targets:
+            missing.append(stem)
+        elif len(targets) > 1:
+            ambiguous.append((stem, len(targets)))
+        else:
+            pending.append((bundle, targets[0]))
 
     print()
     if skipped:
@@ -255,42 +314,60 @@ def main():
         # library file could be overwritten by the wrong document.
         print(f"Not in the library, ignored: {len(missing)}")
         if args.verbose:
-            for stem, _ in missing:
+            for stem in missing:
                 print(f"  - {stem}")
-    for stem, problem in ambiguous:
-        print(f"  ? {stem}: {problem}, cannot tell which")
+    for stem, count in ambiguous:
+        print(f"  ? {stem}: {count} files named {stem}.pdf, cannot tell which")
 
-    if not changed:
-        print("No new annotations to install.")
-        return
-
-    verb = "Installing" if args.install else "Would install"
-    print(f"\n{verb} {len(changed)} document(s):")
-    for stem, pdf, target in changed:
-        print(f"  -> {target}")
-        if not args.install:
-            continue
-        preserve_original(target, originals_dir)
-        shutil.copy2(pdf, target)
-        state[stem] = {
-            "bundle_sha256": fingerprints[stem],
-            "installed_to": str(target),
-            "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    changed = []
+    if pending:
+        unpack([bundle for bundle, _ in pending], xochitl_dir)
+        produced = {
+            pdf.name[: -len(SUFFIX)]: pdf
+            for pdf in convert(args.remarks_cmd, xochitl_dir, out_dir)
         }
+        for bundle, target in pending:
+            pdf = produced.get(bundle.stem)
+            if pdf is None:
+                # remarks names its output from the document's visibleName,
+                # which should equal the name rmapi gave the bundle. Say so if
+                # it did not, rather than reporting a document as synced that
+                # never converted.
+                print(f"  ? {bundle.stem}: remarks produced no output")
+                continue
+            changed.append((bundle.stem, pdf, target))
+
+    if changed:
+        print(f"\n{'Installing' if args.install else 'Would install'} {len(changed)} document(s):")
+        for stem, pdf, target in changed:
+            print(f"  -> {target}")
+            if not args.install:
+                continue
+            preserve_original(target, originals_dir)
+            shutil.copy2(pdf, target)
+            state[stem] = {
+                "bundle_sha256": fingerprints[stem],
+                "installed_to": str(target),
+                "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+        if args.install:
+            state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    else:
+        print("No new annotations to install.")
+
+    if args.push:
+        push_new(library, on_device, args.rm_dest, args.install)
 
     if not args.install:
-        print("\nRe-run with --install to apply.")
-        return
-
-    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
-
-    print(
-        "\nIn Zotero, open each item above and use File -> Import Annotations.\n"
-        "Zotero strips annotations from the PDF as it imports them, so a document\n"
-        "you have already imported and then annotated again will arrive carrying\n"
-        "its full history. Delete that item's existing Zotero annotations before\n"
-        "re-importing, or you will get duplicates of everything you kept."
-    )
+        print("\nNothing was changed. Re-run with --install to apply.")
+    elif changed:
+        print(
+            "\nIn Zotero, open each item above and use File -> Import Annotations.\n"
+            "Zotero strips annotations from the PDF as it imports them, so a document\n"
+            "you have already imported and then annotated again will arrive carrying\n"
+            "its full history. Delete that item's existing Zotero annotations before\n"
+            "re-importing, or you will get duplicates of everything you kept."
+        )
 
 
 if __name__ == "__main__":
