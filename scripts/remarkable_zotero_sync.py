@@ -197,9 +197,22 @@ def preserve_original(target, originals_dir):
 def main():
     args = parse_args()
 
-    for tool in ("rmapi",):
-        if shutil.which(tool) is None:
-            sys.exit(f"{tool} not found on PATH")
+    # Check before the download rather than after it: the conversion runs at
+    # the end of a transfer that can take minutes, and finding out then that
+    # the converter is missing wastes all of it.
+    if shutil.which("rmapi") is None:
+        sys.exit("rmapi not found on PATH: https://github.com/ddvk/rmapi")
+
+    remarks_bin = shlex.split(args.remarks_cmd)[0]
+    if shutil.which(remarks_bin) is None:
+        sys.exit(
+            f"{remarks_bin} not found.\n"
+            "remarks cannot be installed with pip: it pins rmscene to a commit "
+            "while its own dependency rmc asks for the branch, and pip refuses "
+            "two direct references to one package. Use poetry or nix, per\n"
+            "https://github.com/Scrybbling-together/remarks, then point this at "
+            "the result with --remarks-cmd or $REMARKS_CMD."
+        )
 
     zotero_dir = Path(args.zotero_dir).expanduser().resolve()
     if not zotero_dir.is_dir():
