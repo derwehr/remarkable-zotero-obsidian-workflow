@@ -98,11 +98,22 @@ After a sync, open each listed item in Zotero and use
 
 ## Known limitations
 
-**Importing is manual, and re-importing duplicates.** Zotero strips annotations
-from the PDF as it imports them, so a paper you annotate a second time arrives
-carrying its whole history. Delete that item's existing Zotero annotations
-before re-importing. Writing annotations into Zotero directly through its API
-would fix both halves of this, and is the obvious next thing to try.
+**Importing is manual, and re-importing duplicates.** Both follow from the
+annotations travelling inside the PDF. A PDF carries every highlight it has
+with no identity per highlight, so Zotero cannot tell which ones it imported
+before and re-imports all of them; and the import itself is a reader menu
+action, so it cannot be scripted. Delete an item's existing Zotero annotations
+before re-importing it.
+
+Writing the highlights into Zotero directly would fix both, and drop the need
+to overwrite library files at all — the rectangles and text are already in hand
+by the time remarks renders them. There is no supported way to do it today.
+Annotations appear nowhere in the Zotero Web API v3 documentation, and the
+local API is read-only ("Write requests are currently unsupported. Only `GET`
+is accepted."), with write support listed as coming in a future version. The
+annotation fields are known from community sources and creating them may well
+work against undocumented behaviour, but that is a different proposition from
+a supported route. Worth revisiting when local API writes ship.
 
 **Handwriting stays flat.** remarks renders scribbles onto the page rather than
 as annotation objects. They are visible in the PDF but Zotero cannot do
