@@ -68,19 +68,26 @@ def parse_args():
         action="store_true",
         help="Actually replace the PDFs in your library. Without this, only report.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Name every document that has no matching file in the library",
+    )
     return parser.parse_args()
 
 
 def run(cmd, cwd=None):
-    """Run a command, echoing it first so a cron log shows what happened."""
-    print(f"  $ {shlex.join(cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    """Run a command, echoing it first so a cron log shows what happened.
+
+    Output is deliberately not captured. rmapi reports progress per document
+    as it downloads, and prompts for a one-time code once its token expires.
+    Capturing either turns a long download into an unreadable pause, and an
+    auth prompt into a silent hang on a question you never saw.
+    """
+    print(f"  $ {shlex.join(cmd)}", flush=True)
+    result = subprocess.run(cmd, cwd=cwd)
     if result.returncode != 0:
-        sys.exit(
-            f"command failed ({result.returncode}): {shlex.join(cmd)}\n"
-            f"{result.stderr.strip()}"
-        )
-    return result.stdout
+        sys.exit(f"command failed ({result.returncode}): {shlex.join(cmd)}")
 
 
 def sha256(path):
@@ -140,12 +147,12 @@ def find_target(zotero_dir, stem):
         if path.is_file() and not path.name.startswith(".")
     ]
     if not matches:
-        return None, f"no file named {stem}.pdf under {zotero_dir}"
+        return None, "missing", f"no file named {stem}.pdf under {zotero_dir}"
     if len(matches) > 1:
         # Same posture as the Drive script: ambiguity means do nothing rather
         # than overwrite whichever copy happened to be found first.
-        return None, f"{len(matches)} files named {stem}.pdf, cannot tell which"
-    return matches[0], None
+        return None, "ambiguous", f"{len(matches)} files named {stem}.pdf"
+    return matches[0], None, None
 
 
 def preserve_original(target, originals_dir):
@@ -195,7 +202,7 @@ def main():
     unpack(bundles, xochitl_dir)
     converted = convert(args.remarks_cmd, xochitl_dir, out_dir)
 
-    changed, skipped, unresolved = [], [], []
+    changed, skipped, missing, ambiguous = [], [], [], []
 
     for pdf in converted:
         stem = pdf.name[: -len(SUFFIX)]
@@ -204,9 +211,9 @@ def main():
             skipped.append(stem)
             continue
 
-        target, problem = find_target(zotero_dir, stem)
+        target, kind, problem = find_target(zotero_dir, stem)
         if target is None:
-            unresolved.append((stem, problem))
+            (ambiguous if kind == "ambiguous" else missing).append((stem, problem))
             continue
 
         changed.append((stem, pdf, target))
@@ -214,8 +221,17 @@ def main():
     print()
     if skipped:
         print(f"Unchanged since last sync: {len(skipped)}")
-    for stem, problem in unresolved:
-        print(f"  ? {stem}: {problem}")
+    if missing:
+        # Syncing the whole device sweeps up notebooks and ebooks that were
+        # never Zotero items, so an unmatched document is the normal case and
+        # not worth a line each. Ambiguity below still is: it means a real
+        # library file could be overwritten by the wrong document.
+        print(f"Not in the library, ignored: {len(missing)}")
+        if args.verbose:
+            for stem, _ in missing:
+                print(f"  - {stem}")
+    for stem, problem in ambiguous:
+        print(f"  ? {stem}: {problem}, cannot tell which")
 
     if not changed:
         print("No new annotations to install.")
