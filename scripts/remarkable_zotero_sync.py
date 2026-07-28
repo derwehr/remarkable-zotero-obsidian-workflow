@@ -70,6 +70,16 @@ def parse_args():
         help="Actually replace the PDFs in your library. Without this, only report.",
     )
     parser.add_argument(
+        "--push",
+        action="store_true",
+        help="Also send library PDFs the tablet does not have yet",
+    )
+    parser.add_argument(
+        "--rm-dest",
+        default=os.environ.get("RM_DEST", "/"),
+        help="Folder on the reMarkable to push new PDFs into (default: %(default)s)",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Name every document that has no matching file in the library",
@@ -141,7 +151,11 @@ def download_bundles(rm_folder, dest):
     for name in sorted(duplicates):
         print(f"  ? {name}: {len(by_name[name])} documents share this name, ignored")
 
-    return bundles
+    # Every name the tablet holds, including the ones ignored above, so that
+    # pushing does not re-upload a paper that is merely ambiguous or deleted.
+    on_device = {bundle.stem for bundle in kept + trashed}
+
+    return bundles, on_device
 
 
 def unpack(bundles, xochitl_dir):
@@ -187,6 +201,33 @@ def index_library(zotero_dir):
                 index.setdefault(name[: -len(".pdf")], []).append(Path(root) / name)
     print(f"  {len(index)} PDF(s)")
     return index
+
+
+def push_new(library, on_device, dest, install):
+    """Send library PDFs the tablet does not already hold.
+
+    Only ever uploads what is missing. A document already on the tablet is
+    left alone even when the local file differs, because after a sync it
+    differs precisely because the annotations were written into it: pushing
+    that back would make the annotated copy the tablet's source PDF, and the
+    next sync would render the same annotations onto it a second time.
+
+    Names already in the tablet's trash count as present. Deleting a paper on
+    the device is a decision, and re-uploading it every run would undo it.
+    """
+    outstanding = sorted(
+        paths[0] for name, paths in library.items()
+        if name not in on_device and len(paths) == 1
+    )
+    if not outstanding:
+        print("\nTablet already has every paper in the library.")
+        return
+
+    print(f"\n{'Sending' if install else 'Would send'} {len(outstanding)} new paper(s) to {dest}:")
+    for path in outstanding:
+        print(f"  <- {path.name}")
+        if install:
+            run(["rmapi", "put", str(path), dest])
 
 
 def preserve_original(target, originals_dir):
@@ -236,10 +277,7 @@ def main():
     xochitl_dir = fresh_dir(work_dir / "xochitl")
     out_dir = fresh_dir(work_dir / "out")
 
-    bundles = download_bundles(args.rm_folder, downloads)
-    if not bundles:
-        print("Nothing to do.")
-        return
+    bundles, on_device = download_bundles(args.rm_folder, downloads)
 
     # Hash the source bundle rather than the converted PDF: the question is
     # whether the annotations changed, not whether remarks renders identically
@@ -281,58 +319,55 @@ def main():
     for stem, count in ambiguous:
         print(f"  ? {stem}: {count} files named {stem}.pdf, cannot tell which")
 
-    if not pending:
-        print("No new annotations to install.")
-        return
-
-    unpack([bundle for bundle, _ in pending], xochitl_dir)
-    produced = {
-        pdf.name[: -len(SUFFIX)]: pdf
-        for pdf in convert(args.remarks_cmd, xochitl_dir, out_dir)
-    }
-
     changed = []
-    for bundle, target in pending:
-        pdf = produced.get(bundle.stem)
-        if pdf is None:
-            # remarks names its output from the document's visibleName, which
-            # should equal the name rmapi gave the bundle. Say so if it did not,
-            # rather than reporting a document as synced that never converted.
-            print(f"  ? {bundle.stem}: remarks produced no output")
-            continue
-        changed.append((bundle.stem, pdf, target))
-
-    if not changed:
-        print("No new annotations to install.")
-        return
-
-    verb = "Installing" if args.install else "Would install"
-    print(f"\n{verb} {len(changed)} document(s):")
-    for stem, pdf, target in changed:
-        print(f"  -> {target}")
-        if not args.install:
-            continue
-        preserve_original(target, originals_dir)
-        shutil.copy2(pdf, target)
-        state[stem] = {
-            "bundle_sha256": fingerprints[stem],
-            "installed_to": str(target),
-            "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    if pending:
+        unpack([bundle for bundle, _ in pending], xochitl_dir)
+        produced = {
+            pdf.name[: -len(SUFFIX)]: pdf
+            for pdf in convert(args.remarks_cmd, xochitl_dir, out_dir)
         }
+        for bundle, target in pending:
+            pdf = produced.get(bundle.stem)
+            if pdf is None:
+                # remarks names its output from the document's visibleName,
+                # which should equal the name rmapi gave the bundle. Say so if
+                # it did not, rather than reporting a document as synced that
+                # never converted.
+                print(f"  ? {bundle.stem}: remarks produced no output")
+                continue
+            changed.append((bundle.stem, pdf, target))
+
+    if changed:
+        print(f"\n{'Installing' if args.install else 'Would install'} {len(changed)} document(s):")
+        for stem, pdf, target in changed:
+            print(f"  -> {target}")
+            if not args.install:
+                continue
+            preserve_original(target, originals_dir)
+            shutil.copy2(pdf, target)
+            state[stem] = {
+                "bundle_sha256": fingerprints[stem],
+                "installed_to": str(target),
+                "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+        if args.install:
+            state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    else:
+        print("No new annotations to install.")
+
+    if args.push:
+        push_new(library, on_device, args.rm_dest, args.install)
 
     if not args.install:
-        print("\nRe-run with --install to apply.")
-        return
-
-    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
-
-    print(
-        "\nIn Zotero, open each item above and use File -> Import Annotations.\n"
-        "Zotero strips annotations from the PDF as it imports them, so a document\n"
-        "you have already imported and then annotated again will arrive carrying\n"
-        "its full history. Delete that item's existing Zotero annotations before\n"
-        "re-importing, or you will get duplicates of everything you kept."
-    )
+        print("\nNothing was changed. Re-run with --install to apply.")
+    elif changed:
+        print(
+            "\nIn Zotero, open each item above and use File -> Import Annotations.\n"
+            "Zotero strips annotations from the PDF as it imports them, so a document\n"
+            "you have already imported and then annotated again will arrive carrying\n"
+            "its full history. Delete that item's existing Zotero annotations before\n"
+            "re-importing, or you will get duplicates of everything you kept."
+        )
 
 
 if __name__ == "__main__":
