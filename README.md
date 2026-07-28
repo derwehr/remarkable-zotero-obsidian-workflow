@@ -126,6 +126,11 @@ before or after installing them:
 It lists every highlight annotation and the text underneath it. A file that
 looks highlighted but reports zero has nothing for Zotero to import.
 
+remarks logs `Some data has not been read` and `only read N bytes` while
+converting, from rmscene meeting blocks written by a newer firmware than it
+knows about. These are noise: highlights come through and import into Zotero
+correctly with those warnings present.
+
 ## Known limitations
 
 **Importing is manual, and re-importing duplicates.** Both follow from the
