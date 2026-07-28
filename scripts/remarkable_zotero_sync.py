@@ -162,24 +162,31 @@ def convert(remarks_cmd, xochitl_dir, out_dir):
     return sorted(out_dir.rglob(f"*{SUFFIX}"))
 
 
-def find_target(zotero_dir, stem):
-    """Locate the library file a converted document belongs to.
+def index_library(zotero_dir):
+    """Index every PDF in the library by name, in one pass.
+
+    Walked rather than globbed per document, for two reasons. Hidden
+    directories have to be pruned as the walk descends: Google Drive keeps
+    deleted files in .Trash, where a paper you threw away still carries the
+    exact name of the one you kept, and writing annotations into the trashed
+    copy would look like success while the real attachment went untouched.
+
+    The other reason is cost. A library on a FUSE-mounted cloud drive turns
+    every directory into a network round trip, so the walk happens once and
+    is answered from memory after that.
 
     The reMarkable document name is the filename ZotMoov created, minus the
-    extension, which is what makes this match possible at all.
+    extension, which is what makes matching on the name possible at all.
     """
-    matches = [
-        path
-        for path in zotero_dir.rglob(f"{stem}.pdf")
-        if path.is_file() and not path.name.startswith(".")
-    ]
-    if not matches:
-        return None, "missing", f"no file named {stem}.pdf under {zotero_dir}"
-    if len(matches) > 1:
-        # Same posture as the Drive script: ambiguity means do nothing rather
-        # than overwrite whichever copy happened to be found first.
-        return None, "ambiguous", f"{len(matches)} files named {stem}.pdf"
-    return matches[0], None, None
+    print(f"Indexing {zotero_dir}", flush=True)
+    index = {}
+    for root, dirs, files in os.walk(zotero_dir):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in files:
+            if name.endswith(".pdf") and not name.startswith("."):
+                index.setdefault(name[: -len(".pdf")], []).append(Path(root) / name)
+    print(f"  {len(index)} PDF(s)")
+    return index
 
 
 def preserve_original(target, originals_dir):
@@ -238,25 +245,26 @@ def main():
     # whether the annotations changed, not whether remarks renders identically
     # between versions.
     fingerprints = {bundle.stem: sha256(bundle) for bundle in bundles}
+    library = index_library(zotero_dir)
 
-    unpack(bundles, xochitl_dir)
-    converted = convert(args.remarks_cmd, xochitl_dir, out_dir)
+    # Decide what is worth converting before converting it. Notebooks and the
+    # guides reMarkable ships with can never match a library file, and each one
+    # still costs a full render, which for a notebook holding typed text means
+    # driving headless Chrome a page at a time.
+    pending, skipped, missing, ambiguous = [], [], [], []
 
-    changed, skipped, missing, ambiguous = [], [], [], []
-
-    for pdf in converted:
-        stem = pdf.name[: -len(SUFFIX)]
-
-        if state.get(stem, {}).get("bundle_sha256") == fingerprints.get(stem):
+    for bundle in bundles:
+        stem = bundle.stem
+        if state.get(stem, {}).get("bundle_sha256") == fingerprints[stem]:
             skipped.append(stem)
             continue
-
-        target, kind, problem = find_target(zotero_dir, stem)
-        if target is None:
-            (ambiguous if kind == "ambiguous" else missing).append((stem, problem))
-            continue
-
-        changed.append((stem, pdf, target))
+        targets = library.get(stem, [])
+        if not targets:
+            missing.append(stem)
+        elif len(targets) > 1:
+            ambiguous.append((stem, len(targets)))
+        else:
+            pending.append((bundle, targets[0]))
 
     print()
     if skipped:
@@ -268,10 +276,31 @@ def main():
         # library file could be overwritten by the wrong document.
         print(f"Not in the library, ignored: {len(missing)}")
         if args.verbose:
-            for stem, _ in missing:
+            for stem in missing:
                 print(f"  - {stem}")
-    for stem, problem in ambiguous:
-        print(f"  ? {stem}: {problem}, cannot tell which")
+    for stem, count in ambiguous:
+        print(f"  ? {stem}: {count} files named {stem}.pdf, cannot tell which")
+
+    if not pending:
+        print("No new annotations to install.")
+        return
+
+    unpack([bundle for bundle, _ in pending], xochitl_dir)
+    produced = {
+        pdf.name[: -len(SUFFIX)]: pdf
+        for pdf in convert(args.remarks_cmd, xochitl_dir, out_dir)
+    }
+
+    changed = []
+    for bundle, target in pending:
+        pdf = produced.get(bundle.stem)
+        if pdf is None:
+            # remarks names its output from the document's visibleName, which
+            # should equal the name rmapi gave the bundle. Say so if it did not,
+            # rather than reporting a document as synced that never converted.
+            print(f"  ? {bundle.stem}: remarks produced no output")
+            continue
+        changed.append((bundle.stem, pdf, target))
 
     if not changed:
         print("No new annotations to install.")
