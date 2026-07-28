@@ -21,6 +21,25 @@ reMarkable cloud  ->  tablet, read and annotate
 same local folder  ->  Zotero: File -> Import Annotations
 ```
 
+## Coming from the Google Drive setup
+
+Delete the Apps Script trigger first, at <https://script.google.com> under
+Triggers. That script trashed the unannotated original before renaming the
+annotated copy over it, so any run that failed between those two steps left the
+file in Drive's trash with nothing live carrying its name, and Zotero reporting
+the attachment as missing. On an hourly trigger it keeps getting chances.
+
+Then restore what it took, from Drive's own trash at <https://drive.google.com>
+rather than through the mount. To find the casualties, list trashed PDFs that
+have no live counterpart:
+
+```sh
+comm -23 <(basename -a ~/google-drive/.Trash/*.pdf | sort -u) \
+         <(basename -a ~/google-drive/zotero/*.pdf | sort -u)
+```
+
+Once the library is a local folder, none of this applies any more.
+
 ## Setup
 
 ### Zotero
@@ -96,13 +115,35 @@ reports what it would change.
 After a sync, open each listed item in Zotero and use
 `File -> Import Annotations`.
 
+To check that the round trip actually produced annotations Zotero can read,
+before or after installing them:
+
+```sh
+"$(dirname "$(readlink -f "$(command -v remarks)")")/python" \
+  scripts/show_highlights.py ~/.cache/remarkable-zotero-sync/out
+```
+
+It lists every highlight annotation and the text underneath it. A file that
+looks highlighted but reports zero has nothing for Zotero to import.
+
 ## Known limitations
 
-**Importing is manual, and re-importing duplicates.** Zotero strips annotations
-from the PDF as it imports them, so a paper you annotate a second time arrives
-carrying its whole history. Delete that item's existing Zotero annotations
-before re-importing. Writing annotations into Zotero directly through its API
-would fix both halves of this, and is the obvious next thing to try.
+**Importing is manual, and re-importing duplicates.** Both follow from the
+annotations travelling inside the PDF. A PDF carries every highlight it has
+with no identity per highlight, so Zotero cannot tell which ones it imported
+before and re-imports all of them; and the import itself is a reader menu
+action, so it cannot be scripted. Delete an item's existing Zotero annotations
+before re-importing it.
+
+Writing the highlights into Zotero directly would fix both, and drop the need
+to overwrite library files at all — the rectangles and text are already in hand
+by the time remarks renders them. There is no supported way to do it today.
+Annotations appear nowhere in the Zotero Web API v3 documentation, and the
+local API is read-only ("Write requests are currently unsupported. Only `GET`
+is accepted."), with write support listed as coming in a future version. The
+annotation fields are known from community sources and creating them may well
+work against undocumented behaviour, but that is a different proposition from
+a supported route. Worth revisiting when local API writes ship.
 
 **Handwriting stays flat.** remarks renders scribbles onto the page rather than
 as annotation objects. They are visible in the PDF but Zotero cannot do
