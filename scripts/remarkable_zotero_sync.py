@@ -60,8 +60,9 @@ def parse_args():
     )
     parser.add_argument(
         "--remarks-cmd",
-        default=os.environ.get("REMARKS_CMD", "python -m remarks"),
-        help="How to invoke remarks (default: %(default)s)",
+        default=os.environ.get("REMARKS_CMD", "remarks"),
+        help="How to invoke remarks (default: %(default)s). Use a full path if "
+        "you installed it into a venv that is not on PATH.",
     )
     parser.add_argument(
         "--install",
@@ -112,8 +113,34 @@ def download_bundles(rm_folder, dest):
     geta renders an annotated PDF, which throws away the scene data."""
     print(f"Downloading {rm_folder} from the reMarkable cloud")
     run(["rmapi", "mget", rm_folder], cwd=dest)
-    bundles = sorted(dest.rglob("*.rmdoc"))
+
+    kept, trashed = [], []
+    for bundle in sorted(dest.rglob("*.rmdoc")):
+        parts = bundle.relative_to(dest).parts
+        # Deleted documents come down too, and a paper you threw away can
+        # still share its name with a live library file. Annotations from a
+        # document you deleted must never land on the copy you kept.
+        if len(parts) > 1 and parts[0] == "trash":
+            trashed.append(bundle)
+        else:
+            kept.append(bundle)
+
+    by_name = {}
+    for bundle in kept:
+        by_name.setdefault(bundle.stem, []).append(bundle)
+
+    # Everything downstream is keyed by document name: remarks names its
+    # output after it, and the library lookup matches on it. Two documents
+    # sharing a name cannot be told apart, so neither one is safe to use.
+    bundles = [group[0] for group in by_name.values() if len(group) == 1]
+    duplicates = [name for name, group in by_name.items() if len(group) > 1]
+
     print(f"  {len(bundles)} document(s)")
+    if trashed:
+        print(f"  {len(trashed)} in the trash, ignored")
+    for name in sorted(duplicates):
+        print(f"  ? {name}: {len(by_name[name])} documents share this name, ignored")
+
     return bundles
 
 
