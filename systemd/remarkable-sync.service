@@ -1,0 +1,23 @@
+[Unit]
+Description=Pull reMarkable annotations into the Zotero library
+# The whole job is network calls, so starting before the network is up just
+# produces a failed unit that waits for the next timer tick.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Adjust these three to your paths. remarks is given as an absolute path
+# because ~/.local/bin is not on the PATH a user unit runs with, so the
+# symlink there will not be found.
+Environment=ZOTERO_LINKED_DIR=%h/papers
+Environment=REMARKS_CMD=%h/src/remarks/.venv/bin/remarks
+ExecStart=%h/remarkable-zotero-obsidian-workflow/scripts/remarkable_zotero_sync.py --install
+
+# Deliberately no --push. Pushing uploads every library paper the tablet does
+# not already have, which for a full library is hundreds of documents at once.
+# Run that by hand, when you mean it.
+
+Nice=10
+IOSchedulingClass=idle

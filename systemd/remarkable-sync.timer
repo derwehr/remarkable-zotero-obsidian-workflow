@@ -1,0 +1,17 @@
+[Unit]
+Description=Pull reMarkable annotations hourly
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+
+# Catch up on a tick missed while the machine was asleep or off, rather than
+# waiting a full interval for the next one.
+Persistent=true
+
+# Every run downloads the whole device, so avoid several machines or a resumed
+# laptop all hitting the cloud on the same second.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

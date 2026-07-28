@@ -131,6 +131,36 @@ converting, from rmscene meeting blocks written by a newer firmware than it
 knows about. These are noise: highlights come through and import into Zotero
 correctly with those warnings present.
 
+## Running it automatically
+
+Nothing local changes when you highlight something on the tablet, and rmapi has
+no notification support, so the pull direction has to poll. A user timer:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp systemd/remarkable-sync.{service,timer} ~/.config/systemd/user/
+# edit the three paths in the .service first
+systemctl --user daemon-reload
+systemctl --user enable --now remarkable-sync.timer
+```
+
+```sh
+systemctl --user list-timers remarkable-sync.timer   # when it next fires
+journalctl --user -u remarkable-sync -f              # what it did
+```
+
+Run `sudo loginctl enable-linger $USER` if it should also run while you are
+logged out.
+
+The unit deliberately does not pass `--push`. Pushing uploads every library
+paper the tablet does not already have, which on a full library means hundreds
+of documents in one go, so run that by hand when you actually mean to.
+
+Each run downloads the whole device. That is fine for a handful of documents;
+if the tablet's library grows enough for hourly full downloads to hurt, the fix
+is to list first and fetch only what changed — `rmapi stat` reports a `Version`
+and `ModifiedClient` per document.
+
 ## Known limitations
 
 **Importing is manual, and re-importing duplicates.** Both follow from the
