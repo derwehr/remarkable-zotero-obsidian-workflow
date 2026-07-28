@@ -101,11 +101,19 @@ def run(cmd, cwd=None):
         sys.exit(f"command failed ({result.returncode}): {shlex.join(cmd)}")
 
 
-def sha256(path):
+def fingerprint(bundle):
+    """Hash what a bundle contains, not the file it arrived in.
+
+    rmapi builds the archive at download time and stamps every entry with the
+    moment it did so, so an untouched document produces a different .rmdoc on
+    every run. Hashing the container would mark everything as changed every
+    time, which is the same as having no change detection at all.
+    """
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
+    with zipfile.ZipFile(bundle) as archive:
+        for name in sorted(archive.namelist()):
+            digest.update(name.encode())
+            digest.update(archive.read(name))
     return digest.hexdigest()
 
 
@@ -197,8 +205,9 @@ def index_library(zotero_dir):
     for root, dirs, files in os.walk(zotero_dir):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for name in files:
-            if name.endswith(".pdf") and not name.startswith("."):
-                index.setdefault(name[: -len(".pdf")], []).append(Path(root) / name)
+            path = Path(root) / name
+            if name.endswith(".pdf") and not name.startswith(".") and path.is_file():
+                index.setdefault(name[: -len(".pdf")], []).append(path)
     print(f"  {len(index)} PDF(s)")
     return index
 
@@ -235,11 +244,21 @@ def preserve_original(target, originals_dir):
 
     remarks always rebuilds from the tablet's stored original, so this is
     belt-and-braces, but it costs one copy and saves a restore from backup.
+
+    An empty target is a library file that is already lost, and copying it
+    would leave a backup that looks like a safety net while restoring nothing.
+    Say so instead, and let the install go ahead: what remarks produced is the
+    tablet's copy of the paper plus its annotations, so writing it over an
+    empty file replaces nothing and restores the paper.
     """
+    if target.stat().st_size == 0:
+        return False
+
     keep = originals_dir / target.name
     if not keep.exists():
         originals_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(target, keep)
+    return True
 
 
 def main():
@@ -274,15 +293,15 @@ def main():
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
 
     downloads = fresh_dir(work_dir / "downloads")
-    xochitl_dir = fresh_dir(work_dir / "xochitl")
-    out_dir = fresh_dir(work_dir / "out")
+    xochitl_dir = work_dir / "xochitl"
+    out_dir = work_dir / "out"
 
     bundles, on_device = download_bundles(args.rm_folder, downloads)
 
     # Hash the source bundle rather than the converted PDF: the question is
     # whether the annotations changed, not whether remarks renders identically
     # between versions.
-    fingerprints = {bundle.stem: sha256(bundle) for bundle in bundles}
+    fingerprints = {bundle.stem: fingerprint(bundle) for bundle in bundles}
     library = index_library(zotero_dir)
 
     # Decide what is worth converting before converting it. Notebooks and the
@@ -321,6 +340,11 @@ def main():
 
     changed = []
     if pending:
+        # Rebuilt only now that there is something to convert, so a run that
+        # finds nothing leaves the last conversion in place to be inspected
+        # rather than clearing the evidence of what it produced.
+        fresh_dir(xochitl_dir)
+        fresh_dir(out_dir)
         unpack([bundle for bundle, _ in pending], xochitl_dir)
         produced = {
             pdf.name[: -len(SUFFIX)]: pdf
@@ -343,7 +367,8 @@ def main():
             print(f"  -> {target}")
             if not args.install:
                 continue
-            preserve_original(target, originals_dir)
+            if not preserve_original(target, originals_dir):
+                print("     library file was empty, replaced without a backup")
             shutil.copy2(pdf, target)
             state[stem] = {
                 "bundle_sha256": fingerprints[stem],
